@@ -320,6 +320,13 @@ https://api.telegram.org/bot<YOUR_TELEGRAM_TOKEN>/setWebhook?url=<YOUR_DEPLOYMEN
 ```
 *Note: Your `WEBHOOK_SECRET` must contain only alphanumeric characters or underscores, and be exactly 1-256 characters long.*
 
+#### 🧪 Testing Telegram Locally (ngrok)
+If you are running the backend on `localhost:8000`, Telegram cannot reach you. To test the bot locally:
+1. Run your backend: `uvicorn main:app --reload`
+2. In a new terminal, start a tunnel: `ngrok http 8000`
+3. Copy the `https://....ngrok-free.app` URL provided by ngrok.
+4. Run the webhook registration URL above, replacing `<YOUR_DEPLOYMENT_URL>` with your ngrok URL.
+
 ```env
 # ── MANDATORY ──────────────────────────────────────────────────
 SECRET_KEY=            # output of: python keygen.py
