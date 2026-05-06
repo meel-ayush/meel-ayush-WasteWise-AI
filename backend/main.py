@@ -2104,11 +2104,16 @@ async def cv_inventory_scan(
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
     """Receive Telegram webhook updates."""
+    from services.security import verify_telegram_webhook
     webhook_secret = os.environ.get("WEBHOOK_SECRET", "")
-    if webhook_secret:
-        incoming = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if incoming != webhook_secret:
-            return {"ok": True}  # Silently reject
+    if not webhook_secret:
+        print("[Webhook] Error: WEBHOOK_SECRET is not set. Rejecting message for maximum security.")
+        return {"ok": True}
+        
+    incoming = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if not verify_telegram_webhook(incoming, webhook_secret):
+        print("[Webhook] Security warning: Unauthorized webhook access attempt.")
+        return {"ok": True}  # Silently reject
     try:
         data = await request.json()
     except Exception:
