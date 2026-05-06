@@ -186,7 +186,14 @@ def _pull_from_supabase() -> dict:
         ]
 
         def _fetch(table: str):
-            return table, (_sb.table(table).select("*").execute().data or [])
+            for attempt in range(3):
+                try:
+                    return table, (_sb.table(table).select("*").execute().data or [])
+                except Exception as e:
+                    if attempt == 2:
+                        raise e
+                    import time
+                    time.sleep(1 + attempt)
 
         raw: dict = {}
         with ThreadPoolExecutor(max_workers=8) as pool:

@@ -74,8 +74,17 @@ app.add_middleware(SecurityHeadersMiddleware)
 # Gap 4: Audit all write operations automatically
 app.add_middleware(AuditMiddleware)
 
-# CORS — restrict to configured origins only
-ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+# CORS — strict origin enforcement
+# ALLOWED_ORIGINS MUST be explicitly set.
+# Failing to set it raises an error at startup.
+_origins_raw = os.environ.get("ALLOWED_ORIGINS", "").strip()
+if not _origins_raw:
+    raise RuntimeError(
+        "[STARTUP] ALLOWED_ORIGINS environment variable is not set. "
+        "Set it to your frontend URL (e.g. https://yourapp.vercel.app or http://localhost:3000) before starting."
+    )
+ALLOWED_ORIGINS = [o.strip() for o in _origins_raw.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -597,11 +606,10 @@ async def api_request_otp(request: Request, email: Optional[str] = None):
     email = validate_email(email or "")
     account = auth.get_account_by_email(email)
     if not account:
-        # Return same response whether email exists or not (prevents enumeration)
-        return {"status": "otp_sent", "expires_in": auth.OTP_TTL_SECONDS}
+        raise HTTPException(status_code=404, detail="Email not registered. Please create an account.")
     primary = next((s for s in account.get("sessions",[]) if s.get("is_primary") and s.get("chat_id")), None)
     if not primary:
-        return {"status": "otp_sent", "expires_in": auth.OTP_TTL_SECONDS}  # same response
+        raise HTTPException(status_code=400, detail="No Telegram account linked. Please verify your account on Telegram.")
     otp      = auth.create_otp(email, "web_login")
     tg_token = os.environ.get("TELEGRAM_TOKEN", "")
     if tg_token:
@@ -615,7 +623,7 @@ async def api_request_otp(request: Request, email: Optional[str] = None):
                     json={"chat_id": primary["chat_id"], "text": msg, "parse_mode": "Markdown"},
                     timeout=10,
                 )
-        except Exception as e:
+        except Exception:
             pass   # Don't expose internal errors
     # NEVER return the OTP or chat_id to the browser
     return {"status": "otp_sent", "expires_in": auth.OTP_TTL_SECONDS}
@@ -694,6 +702,62 @@ def api_remove_session(session_prefix: str, request: Request):
         raise HTTPException(status_code=400, detail="Cannot remove the primary session.")
     removed = auth.remove_session(info["email"], target["session_id"])
     return {"status": "removed" if removed else "not_found"}
+
+
+@app.patch("/api/auth/session/{session_prefix}/make_primary")
+def api_make_session_primary(session_prefix: str, request: Request):
+    """
+    Transfer primary status to a different already-linked Telegram session.
+
+    Rules enforced:
+    - Caller must be authenticated (valid Bearer token)
+    - Caller's current token must belong to the PRIMARY Telegram session
+      (only the primary can transfer primacy — prevents hostile takeover)
+    - Target session must be of type 'telegram' (not a web browser session)
+    - Exactly ONE primary exists at all times — the old primary is demoted
+    """
+    auth_header = request.headers.get("Authorization", "")
+    token = auth_header[7:].strip() if auth_header.startswith("Bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization header required.")
+    info = auth.validate_web_token(token)
+    if not info:
+        raise HTTPException(status_code=401, detail="Session expired.")
+
+    db = load_database()
+    account = next((a for a in db.get("accounts", []) if a["email"].lower() == info["email"].lower()), None)
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found.")
+
+    sessions = account.get("sessions", [])
+
+    # Verify the caller's own session is the current primary Telegram session
+    caller_session = next((s for s in sessions if s["session_id"] == token), None)
+    if not caller_session or not caller_session.get("is_primary"):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the primary Telegram account can transfer primary status."
+        )
+
+    # Find target session to promote
+    target = next((s for s in sessions if s["session_id"].startswith(session_prefix)), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    if target.get("session_id") == caller_session.get("session_id"):
+        raise HTTPException(status_code=400, detail="This session is already primary.")
+    if target.get("type") != "telegram":
+        raise HTTPException(status_code=400, detail="Only Telegram sessions can be made primary.")
+
+    # Transfer: demote all, promote target
+    for s in sessions:
+        s["is_primary"] = (s["session_id"] == target["session_id"])
+
+    save_database(db)
+    return {
+        "status": "primary_transferred",
+        "new_primary_session": target["session_id"][:8],
+        "new_primary_telegram": target.get("telegram_username", ""),
+    }
 
 
 @app.delete("/api/auth/account")
@@ -1186,8 +1250,14 @@ def place_customer_order(payload: CustomerOrderPayload):
     order_id = "ord_" + str(_uuid_mod.uuid4())[:8]
     created_now      = _dt_mod.datetime.now()
     pickup_deadline  = (created_now + _dt_mod.timedelta(minutes=45)).isoformat()
+
+    # Daily sequential order number (resets at midnight)
+    today_orders_so_far = [o for o in restaurant.get("marketplace_orders", []) if o.get("date") == today_str]
+    order_num = len(today_orders_so_far) + 1
+
     order = {
         "order_id":               order_id,
+        "order_num":              order_num,
         "date":                   today_str,
         "created_at":             created_now.isoformat(),
         "pickup_deadline":        pickup_deadline,
@@ -1214,16 +1284,16 @@ def place_customer_order(payload: CustomerOrderPayload):
         deadline_dt  = _dt_mod.datetime.fromisoformat(pickup_deadline)
         deadline_fmt = deadline_dt.strftime("%I:%M %p")
         msg = (
-            f"\ud83d\uded2 *New Order — {restaurant['name']}!*\n\n"
-            f"\ud83d\udc64 *Customer:* {payload.customer_name}\n"
-            f"\ud83d\udcf1 *Phone:* {payload.phone}\n\n"
-            f"\ud83c\udf7d\ufe0f *Items:* {items_str}\n"
-            f"\ud83d\udcb0 *Total:* RM {total_rm:.2f}\n"
-            f"\ud83d\udcdd *Notes:* {payload.pickup_notes or 'None'}\n\n"
-            f"\u23f0 *Pickup by:* {deadline_fmt} (within 45 min)\n\n"
-            f"\ud83c\udd94 Order ID: `{order_id}`\n\n"
-            f"\u2705 Reply `done {order_id}` when customer collects\n"
-            f"\u274c Reply `miss {order_id}` if not picked up"
+            f"\U0001F6D2 *Order #{order_num} — {restaurant['name']}!*\n\n"
+            f"\U0001F464 *Customer:* {payload.customer_name}\n"
+            f"\U0001F4F1 *Phone:* {payload.phone}\n\n"
+            f"\U0001F37D\uFE0F *Items:* {items_str}\n"
+            f"\U0001F4B0 *Total:* RM {total_rm:.2f}\n"
+            f"\U0001F4DD *Notes:* {payload.pickup_notes or 'None'}\n\n"
+            f"\u23F0 *Pickup by:* {deadline_fmt} (within 45 min)\n\n"
+            f"\U0001F194 Order: `{order_id}`\n\n"
+            f"\u2705 Reply `done {order_num}` when customer collects\n"
+            f"\u274C Reply `miss {order_num}` if not picked up"
         )
         try:
             import asyncio as _aio
@@ -1243,9 +1313,10 @@ def place_customer_order(payload: CustomerOrderPayload):
     return {
         "status": "success",
         "order_id": order_id,
+        "order_num": order_num,
         "total_rm": total_rm,
         "items": order_items,
-        "message": f"Order placed! Pick up at {restaurant['name']} before closing ({restaurant.get('closing_time','')}).",
+        "message": f"Order #{order_num} placed! Pick up at {restaurant['name']} before closing ({restaurant.get('closing_time','')}).",
     }
 
 
@@ -1274,12 +1345,12 @@ def get_orders(restaurant_id: str,
     }
 
 
-@app.patch("/api/restaurant/{restaurant_id}/orders/{order_id}")
+@app.patch("/api/restaurant/{restaurant_id}/orders/{order_ref}")
 def update_order_status(
-    restaurant_id: str, order_id: str, status: str,
+    restaurant_id: str, order_ref: str, status: str,
     user: AuthenticatedUser = Depends(require_auth),
 ):
-    """Update order status: pending → completed or cancelled."""
+    """Update order status: pending → completed or cancelled. order_ref can be order_id or today's order_num."""
     _validate_rest_id(restaurant_id)
     require_restaurant_access(restaurant_id, user)
     if status not in ("pending", "completed", "cancelled"):
@@ -1288,11 +1359,14 @@ def update_order_status(
     restaurant = _get_restaurant(db, restaurant_id)
     if not restaurant:
         raise HTTPException(status_code=404, detail="Restaurant not found.")
+    today_str = _dt_mod.date.today().isoformat()
     for order in restaurant.get("marketplace_orders", []):
-        if order.get("order_id") == order_id:
+        match_by_id  = order.get("order_id") == order_ref
+        match_by_num = (order.get("date") == today_str and str(order.get("order_num", "")) == str(order_ref))
+        if match_by_id or match_by_num:
             order["status"] = status
             save_database(db)
-            return {"status": "updated", "order_id": order_id, "new_status": status}
+            return {"status": "updated", "order_id": order.get("order_id"), "order_num": order.get("order_num"), "new_status": status}
     raise HTTPException(status_code=404, detail="Order not found.")
 
 
@@ -1994,6 +2068,9 @@ def federated_model_info(user: AuthenticatedUser = Depends(require_auth)):
 
 # =============================================================================
 # COMPUTER VISION INVENTORY — Image-based Stock Detection (Feature 4)
+
+# =============================================================================
+# COMPUTER VISION INVENTORY -- Image-based Stock Detection
 # =============================================================================
 
 @app.post("/api/restaurant/{restaurant_id}/cv_inventory")
@@ -2002,7 +2079,7 @@ async def cv_inventory_scan(
     file: UploadFile = File(...),
     current_user: AuthenticatedUser = Depends(require_auth),
 ):
-    """Upload an inventory photo — AI detects ingredient quantities automatically."""
+    """Upload an inventory photo - AI detects ingredient quantities automatically."""
     _validate_rest_id(restaurant_id)
     require_restaurant_access(restaurant_id, current_user)
     if file.content_type not in ("image/jpeg", "image/png", "image/webp", "image/jpg"):
@@ -2016,6 +2093,7 @@ async def cv_inventory_scan(
     restaurant = _get_restaurant(db, restaurant_id)
     if not restaurant:
         raise HTTPException(404, "Restaurant not found.")
+    from services.computer_vision_inventory import scan_inventory_from_image
     return scan_inventory_from_image(image_bytes, restaurant)
 
 
@@ -2025,12 +2103,12 @@ async def cv_inventory_scan(
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
-    # Validate secret token if configured (prevents forged webhook calls)
+    """Receive Telegram webhook updates."""
     webhook_secret = os.environ.get("WEBHOOK_SECRET", "")
     if webhook_secret:
         incoming = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if incoming != webhook_secret:
-            return {"ok": True}  # Silently reject — don't reveal why
+            return {"ok": True}  # Silently reject
     try:
         data = await request.json()
     except Exception:
@@ -2042,3 +2120,81 @@ async def telegram_webhook(request: Request):
         print(f"[Webhook] Error: {e}")
     return {"ok": True}
 
+
+# =============================================================================
+# DASHBOARD ACTION APPROVAL
+# Bot approves in-process via _pending_dashboard_approvals dict.
+# No public HTTP endpoint for approval - that would be a security flaw.
+# =============================================================================
+
+_pending_dashboard_approvals: dict = {}
+
+
+@app.post("/api/auth/dashboard_action/request")
+async def request_dashboard_action_approval(
+    action: str,
+    restaurant_id: Optional[str] = None,
+    chain_id: Optional[str] = None,
+    user: AuthenticatedUser = Depends(require_auth),
+):
+    """Request primary Telegram approval for a destructive dashboard action."""
+    valid_actions = {"delete_restaurant", "delete_chain", "create_chain", "add_branch", "remove_branch"}
+    if action not in valid_actions:
+        raise HTTPException(400, "action must be one of: " + ", ".join(sorted(valid_actions)))
+    account = auth.get_account_by_email(user.email)
+    if not account:
+        raise HTTPException(404, "Account not found.")
+    primary = next((s for s in account.get("sessions", []) if s.get("is_primary") and s.get("chat_id")), None)
+    if not primary:
+        raise HTTPException(400, "No primary Telegram linked. Connect a Telegram account first.")
+    import secrets as _sec
+    approval_token = _sec.token_urlsafe(16)
+    expires_at = (_dt_mod.datetime.utcnow() + _dt_mod.timedelta(minutes=10)).isoformat()
+    _pending_dashboard_approvals[approval_token] = {
+        "action": action, "restaurant_id": restaurant_id, "chain_id": chain_id,
+        "email": user.email, "status": "pending",
+        "expires_at": expires_at, "primary_chat_id": primary["chat_id"],
+    }
+    action_labels = {
+        "delete_restaurant": "Delete restaurant",
+        "delete_chain":      "Delete entire chain",
+        "create_chain":      "Create new chain",
+        "add_branch":        "Add restaurant to chain",
+        "remove_branch":     "Remove branch from chain",
+    }
+    tg_token = os.environ.get("TELEGRAM_TOKEN", "")
+    if tg_token:
+        import httpx as _httpx2
+        msg = (
+            "\U0001F510 *Dashboard Action Requires Your Approval*\n\n"
+            + "Action: *" + action_labels.get(action, action) + "*\n"
+            + "Resource: " + str(restaurant_id or chain_id or "N/A") + "\n\n"
+            + "Reply `approve " + approval_token[:8] + "` to allow\n"
+            + "Reply `deny " + approval_token[:8] + "` to reject\n\n"
+            + "_Expires in 10 minutes_"
+        )
+        try:
+            async with _httpx2.AsyncClient() as _c:
+                await _c.post(
+                    f"https://api.telegram.org/bot{tg_token}/sendMessage",
+                    json={"chat_id": primary["chat_id"], "text": msg, "parse_mode": "Markdown"},
+                    timeout=8,
+                )
+        except Exception:
+            pass
+    return {"approval_token": approval_token, "expires_in_seconds": 600}
+
+
+@app.get("/api/auth/dashboard_action/status/{approval_token}")
+def check_dashboard_action_status(approval_token: str, user: AuthenticatedUser = Depends(require_auth)):
+    """Poll to check if the primary Telegram has approved/denied the action."""
+    entry = _pending_dashboard_approvals.get(approval_token)
+    if not entry:
+        raise HTTPException(404, "Approval not found or expired.")
+    if entry["email"].lower() != user.email.lower():
+        raise HTTPException(403, "Not your approval request.")
+    now = _dt_mod.datetime.utcnow().isoformat()
+    if entry["expires_at"] < now:
+        _pending_dashboard_approvals.pop(approval_token, None)
+        raise HTTPException(410, "Approval expired.")
+    return {"status": entry["status"], "action": entry["action"]}

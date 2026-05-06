@@ -436,6 +436,125 @@ async def handle_callback(client: httpx.AsyncClient, callback: dict) -> None:
         await _reg_complete(client, chat_id)
     elif data == "reg:restart":
         await start_registration(client, chat_id)
+
+    # ── Delete account choices ─────────────────────────────────────────────────
+    elif data == "delete:keep":
+        account = auth.get_account_by_telegram(chat_id)
+        primary = next((s for s in (account or {}).get("sessions",[]) if s.get("is_primary") and s.get("chat_id") == chat_id), None)
+        if not primary:
+            await _send(client, chat_id, "❌ Only the primary account can delete.")
+        else:
+            _set_state(chat_id, "confirm_delete")
+            await _send(client, chat_id,
+                "🌿 *Confirm Anonymise Account*\n\n"
+                "Your restaurant name, owner info, and Telegram link will be removed.\n"
+                "Anonymised sales history is kept to help improve AI forecasts for other hawkers.\n\n"
+                "Type *YES DELETE MY ACCOUNT* to confirm, or anything else to cancel."
+            )
+    elif data == "delete:hard":
+        account = auth.get_account_by_telegram(chat_id)
+        primary = next((s for s in (account or {}).get("sessions",[]) if s.get("is_primary") and s.get("chat_id") == chat_id), None)
+        if not primary:
+            await _send(client, chat_id, "❌ Only the primary account can delete.")
+        else:
+            _set_state(chat_id, "confirm_delete_hard")
+            await _send(client, chat_id,
+                "💣 *Confirm Permanent Delete*\n\n"
+                "⚠️ This will erase EVERYTHING — account, restaurant, ALL sales history.\n"
+                "This *cannot be undone*.\n\n"
+                "Type *YES DELETE MY ACCOUNT* to confirm, or anything else to cancel."
+            )
+    elif data == "delete:cancel":
+        _set_state(chat_id, None)
+        await _send(client, chat_id, "✅ Deletion cancelled. Your account is safe. 🌿")
+
+    # ── Chain creation confirmation ────────────────────────────────────────────
+    elif data.startswith("chain:create:"):
+        chain_name = data[len("chain:create:"):]
+        account = auth.get_account_by_telegram(chat_id)
+        if not account:
+            await _send(client, chat_id, "❌ Please login first.")
+        else:
+            import uuid as _uuid_bot
+            chain_id = "chain_" + str(_uuid_bot.uuid4())[:8]
+            db_ch = load_database()
+            db_ch.setdefault("chains", []).append({
+                "chain_id": chain_id,
+                "name": chain_name,
+                "owner_email": account["email"],
+                "chain_type": "franchise",
+                "created_at": datetime.datetime.now().isoformat(),
+            })
+            save_database(db_ch)
+            await _send(client, chat_id,
+                f"✅ *Chain created: {chain_name}*\n\n"
+                f"Chain ID: `{chain_id}`\n\n"
+                "Now link your restaurants:\n"
+                f"`add to chain {chain_id}`"
+            )
+    elif data == "chain:cancel":
+        _set_state(chat_id, None)
+        await _send(client, chat_id, "✅ Chain creation cancelled.")
+
+    # ── Security session buttons ────────────────────────────────────────────────
+    elif data.startswith("sec:remove:"):
+        sid_prefix = data[len("sec:remove:"):]  # exactly 8 chars
+        account = auth.get_account_by_telegram(chat_id)
+        if not account:
+            await _send(client, chat_id, "❌ Not logged in.")
+        else:
+            sessions = auth.get_sessions_for_account(account["email"])
+            # Match session whose first 8 chars == sid_prefix (safe: fixed-length comparison)
+            target = next((s for s in sessions if s["session_id"][:8] == sid_prefix), None)
+            if not target:
+                await _send(client, chat_id, "⚠️ Session not found or already removed.")
+            elif target.get("is_primary"):
+                await _send(client, chat_id, "❌ Cannot remove the primary session.")
+            else:
+                is_primary_caller = any(s.get("is_primary") and s.get("chat_id") == chat_id for s in sessions)
+                target_type = target.get("type", "web")
+                # Primary can remove any non-primary. Web sessions can only be removed by primary.
+                if not is_primary_caller:
+                    await _send(client, chat_id, "❌ Only the primary account can remove other sessions.")
+                else:
+                    removed = auth.remove_session(account["email"], target["session_id"])
+                    label = target.get("telegram_username") or target.get("label", "session")
+                    if removed:
+                        await _send(client, chat_id, f"✅ Session *{label}* removed successfully.")
+                    else:
+                        await _send(client, chat_id, "⚠️ Could not remove session.")
+
+    elif data.startswith("sec:mkprimary:"):
+        target_uname = data[len("sec:mkprimary:"):]
+        account = auth.get_account_by_telegram(chat_id)
+        if not account:
+            await _send(client, chat_id, "❌ Not logged in.")
+        else:
+            sessions = auth.get_sessions_for_account(account["email"])
+            is_primary_caller = any(s.get("is_primary") and s.get("chat_id") == chat_id for s in sessions)
+            if not is_primary_caller:
+                await _send(client, chat_id, "❌ Only the current primary account can transfer primary status.")
+            else:
+                target_s = next((s for s in sessions if s.get("telegram_username", "").lower() == target_uname.lower() and s.get("type") == "telegram"), None)
+                if not target_s:
+                    await _send(client, chat_id, f"❌ No Telegram session found for @{target_uname}.")
+                elif target_s.get("is_primary"):
+                    await _send(client, chat_id, f"⭐ @{target_uname} is already the primary.")
+                else:
+                    db_p = load_database()
+                    acc_p = next((a for a in db_p.get("accounts", []) if a["email"].lower() == account["email"].lower()), None)
+                    if acc_p:
+                        for s in acc_p.get("sessions", []):
+                            s["is_primary"] = (s["session_id"] == target_s["session_id"])
+                        save_database(db_p)
+                        await _send(client, chat_id, f"✅ *Primary transferred to @{target_uname}!*\n\nThey now hold primary status.")
+                        new_chat_id = target_s.get("chat_id")
+                        if new_chat_id:
+                            await _send(client, new_chat_id,
+                                f"⭐ *You are now the PRIMARY account!*\n\n"
+                                f"Account: {account['email']}\n"
+                                "You can now approve logins and manage account settings."
+                            )
     elif data.startswith("photo:"):
         intent     = data.split(":")[1]
         photo_data = _get_data(chat_id).get("pending_photo_data")
@@ -453,6 +572,7 @@ async def handle_callback(client: httpx.AsyncClient, callback: dict) -> None:
         await _send(client, chat_id, f"Got it — processing as *{labels.get(csv_type, csv_type)}*…")
         _set_state(chat_id, None)
         await _process_csv(client, chat_id, csv_type)
+
 
 
 # ── Document + photo handlers ─────────────────────────────────────────────────
@@ -993,47 +1113,46 @@ async def handle_text(client: httpx.AsyncClient, chat_id: int, text: str, userna
     tl_parts = tl.strip().split()
     if len(tl_parts) >= 2 and tl_parts[0].lstrip("/") in _order_cmd_map:
         cmd       = tl_parts[0].lstrip("/")
-        order_ref = tl_parts[1].lower()
+        order_ref = tl_parts[1].lower().lstrip("#")
         new_status = _order_cmd_map[cmd]
         rest_id    = _get_rest_id(chat_id)
         if rest_id:
             from services.nlp import load_database, save_database
             db_ord  = load_database()
-            # Search this restaurant's orders
             rest_ord = _get_restaurant(db_ord, rest_id)
             matched_order = None
+            today_str_ord = datetime.date.today().isoformat()
             if rest_ord:
                 for o in rest_ord.get("marketplace_orders", []):
                     oid = o.get("order_id", "").lower()
-                    if oid == order_ref or oid.endswith(order_ref) or order_ref in oid:
+                    # Match by order number (e.g. '5') OR by partial order_id
+                    match_num = (o.get("date") == today_str_ord and str(o.get("order_num", "")) == order_ref)
+                    match_id  = oid == order_ref or oid.endswith(order_ref) or order_ref in oid
+                    if match_num or match_id:
                         matched_order = o
-                        rest_ord_ref  = rest_ord
                         break
             if matched_order:
                 matched_order["status"]       = new_status
                 matched_order["confirmed_at"] = datetime.datetime.now().isoformat()
                 matched_order["confirmed_by"] = "telegram"
                 save_database(db_ord)
+                order_label = f"Order #{matched_order.get('order_num', matched_order['order_id'])}"
                 if new_status == "completed":
                     await _send(client, chat_id,
-                        f"\u2705 *Order confirmed as collected!*\n\n"
-                        f"Order `{matched_order['order_id']}` from "
-                        f"*{matched_order.get('customer_name','Customer')}* marked as *completed*.\n"
-                        f"\ud83d\udcb0 Revenue RM {matched_order.get('total_rm',0):.2f} recorded. "
-                        f"AI learning updated."
+                        f"✅ *{order_label} confirmed as collected!*\n\n"
+                        f"Customer: *{matched_order.get('customer_name','Customer')}*\n"
+                        f"💰 Revenue RM {matched_order.get('total_rm',0):.2f} recorded."
                     )
                 else:
                     await _send(client, chat_id,
-                        f"\u274c *Order marked as missed.*\n\n"
-                        f"Order `{matched_order['order_id']}` from "
-                        f"*{matched_order.get('customer_name','Customer')}* marked as *not picked up*.\n"
-                        f"\ud83d\udce6 Inventory released back. "
-                        f"This no-show is recorded so AI can improve predictions."
+                        f"❌ *{order_label} marked as missed.*\n\n"
+                        f"Customer: *{matched_order.get('customer_name','Customer')}*\n"
+                        f"📦 Inventory released. No-show recorded for AI learning."
                     )
             else:
                 await _send(client, chat_id,
-                    f"\u26a0\ufe0f Order `{order_ref}` not found. "
-                    "Check the order ID and try again.")
+                    f"⚠️ Order `{order_ref}` not found for today. "
+                    "Check the order number and try again.")
             return
 
     await handle_natural_language(client, chat_id, text, username=username)
@@ -1096,7 +1215,6 @@ async def handle_natural_language(client: httpx.AsyncClient, chat_id: int, text:
             await _start_bot_login(client, chat_id)
             return
 
-
         await _send(client, chat_id,
             "👋 Welcome to *WasteWise AI*!\n\n"
             "I help Malaysian restaurants reduce food waste through AI forecasting.\n\n"
@@ -1123,7 +1241,10 @@ async def handle_natural_language(client: httpx.AsyncClient, chat_id: int, text:
             "• *Menu* — _'Add Milo Ais to menu'_ or _'Show my menu'_\n"
             "• *Ingredients* — _'Set ingredients for Nasi Lemak: 200g rice, 50ml coconut milk'_\n"
             "• *Photo* — Send a photo of your receipt or whiteboard\n"
-            "• *File* — Send a CSV or Excel file\n\n"
+            "• *File* — Send a CSV or Excel file\n"
+            "• *Sessions* — _'Who is logged in?'_ or `security`\n"
+            "• *Orders* — _'done 5'_ or _'miss 3'_ to confirm/miss orders\n"
+            "• *Chain* — _'create chain'_ or _'show my chains'_\n\n"
             f"📅 {now}"
         )
         return
@@ -1355,7 +1476,7 @@ async def handle_natural_language(client: httpx.AsyncClient, chat_id: int, text:
         await _send(client, chat_id, "Select your restaurant:", reply_markup=_rest_keyboard())
         _set_state(chat_id, "choosing_restaurant")
 
-    elif intent == "help":
+    if tl in ("help", "/help"):
         await _send(client, chat_id,
             "🌿 *WasteWise AI — Help*\n\n"
             "Just talk normally in English or Malay!\n\n"
@@ -1364,17 +1485,26 @@ async def handle_natural_language(client: httpx.AsyncClient, chat_id: int, text:
             "📈 *Sales* — _'Sold 95 Nasi Lemak today'_\n"
             "🎉 *Events* — _'Wedding tomorrow 300 guests'_\n"
             "🥘 *Ingredients* — _'Set ingredients for Roti Canai: 120g flour, 20g ghee'_\n"
-            "📦 *Inventory* — `inventory` or `stok` — remaining stock at closing time\n"
-            "🛍️ *Orders* — `orders` or `pesanan` — today's customer orders\n"
-            "💰 *Sales/Profit* — `sales` or `profit` — today's earnings breakdown\n"
-            "🔍 *Causal AI* — `/causal` — why did yesterday underperform?\n"
-            "🧠 *Menu Analysis* — `/menueng` — BCG matrix + AI recommendations\n"
-            "📸 *Stock Scan* — `/scan_inventory` — send a shelf photo to detect ingredients\n"
-            "📸 *Photo* — Send a receipt or whiteboard photo\n"
-            "📁 *File* — CSV or Excel, I'll ask what type\n"
+            "📦 *Inventory* — `inventory` or `stok`\n"
+            "🛍️ *Orders* — `orders` — today's orders\n"
+            "✅ *Confirm order* — `done 5` or `collected 5` (today's order number)\n"
+            "❌ *Miss order* — `miss 5` or `missed 5`\n"
+            "💰 *Profit* — `sales` or `profit`\n\n"
+            "👥 *Sessions / Devices*\n"
+            "  • _'Who is logged in?'_ or `security`\n"
+            "  • _'Show all devices'_ or `sessions`\n"
+            "  • `/remove_xxxxxxxx` — remove a linked device\n"
+            "  • `/make_primary @username` — transfer primary to another Telegram\n\n"
+            "🔗 *Chain Management*\n"
+            "  • `create chain My Group` — create a restaurant chain\n"
+            "  • `my chains` — list your chains\n"
+            "  • `add to chain chain_xxxx` — link this restaurant to a chain\n\n"
+            "🗑️ *Delete Account*\n"
+            "  • `/delete_account` — starts the deletion flow\n\n"
             "🔑 *login* — Switch restaurant\n"
             "📝 *register* — Add a new restaurant"
         )
+        return
 
     elif intent == "event":
         description = intent_data.get("description") or "Special event"
@@ -1567,30 +1697,79 @@ async def _handle_bot_login_email(client: httpx.AsyncClient, chat_id: int, email
 
 
 async def _handle_security_menu(client: httpx.AsyncClient, chat_id: int) -> None:
-    """Show account security: linked sessions, remove, delete account."""
+    """
+    Show account security with inline tap-buttons per session.
+    Primary sees: Remove button per non-primary session, Make Primary button per non-primary Telegram session.
+    Non-primary sees: read-only list + message to contact primary.
+    """
     account = auth.get_account_by_telegram(chat_id)
     if not account:
-        await _send(client, chat_id, "Please login first.")
+        await _send(client, chat_id, "Please login first. Type `login`.")
         return
 
     sessions = auth.get_sessions_for_account(account["email"])
-    lines    = [f"🔐 *Account Security — {account['email']}*\n"]
-    for s in sessions:
-        marker = "⭐ PRIMARY" if s.get("is_primary") else "🔗"
-        label  = s.get("telegram_username") or s.get("label") or s.get("type", "unknown")
-        label  = f"@{label}" if s.get("type") == "telegram" and not label.startswith("@") else label
-        exp    = f" (expires {s['expires_at'][:10]})" if s.get("expires_at") else ""
-        lines.append(f"{marker} {label}{exp}")
-        if not s.get("is_primary"):
-            lines.append(f"   /remove_{s['session_id'][:8]}")
+    is_primary_caller = any(s.get("is_primary") and s.get("chat_id") == chat_id for s in sessions)
 
-    lines.append("\n_Type /remove_[id] to unlink a session._")
+    # Build summary text
+    lines = [f"🔐 *Security — {account['email']}*\n"]
+    lines.append(f"Total sessions: *{len(sessions)}*\n")
 
-    primary = next((s for s in sessions if s.get("is_primary") and s.get("chat_id") == chat_id), None)
-    if primary:
-        lines.append("\n⚠️ _You are the primary account. Only you can type /delete_account to delete all data._")
-
+    # Send individual message per session with inline buttons
     await _send(client, chat_id, "\n".join(lines))
+
+    for s in sessions:
+        stype = s.get("type", "web")
+        sid   = s.get("session_id", "")[:8]
+        is_p  = s.get("is_primary", False)
+        uname = s.get("telegram_username", "")
+        label = s.get("label", "")
+        exp   = s.get("expires_at", "")
+
+        if stype == "telegram":
+            icon = "⭐" if is_p else "📱"
+            name = f"@{uname}" if uname else f"Telegram"
+        else:
+            icon = "🌐"
+            name = label or "Web browser"
+
+        if is_p:
+            exp_str = "never expires"
+        elif exp:
+            exp_str = f"exp. {exp[:10]}"
+        else:
+            exp_str = "no expiry set"
+
+        session_text = (
+            f"{icon} *{name}*\n"
+            f"Type: {stype} · {exp_str}\n"
+            f"ID: `{sid}`"
+        )
+
+        # Build inline buttons for this session
+        buttons = []
+        if not is_p:
+            buttons.append({"text": "🗑 Remove this session", "callback_data": f"sec:remove:{sid}"})
+        if stype == "telegram" and not is_p and is_primary_caller and uname:
+            buttons.append({"text": "⭐ Make Primary", "callback_data": f"sec:mkprimary:{uname}"})
+
+        kb = _inline_keyboard([buttons]) if buttons else None
+        await _send(client, chat_id, session_text, reply_markup=kb)
+
+    # Footer message
+    if is_primary_caller:
+        await _send(client, chat_id,
+            "─────────────────────────────\n"
+            "⭐ *You are the primary account.*\n"
+            "• Tap ⭐ Make Primary on a Telegram session to transfer\n"
+            "• Tap 🗑 Remove on any session to revoke access\n"
+            "• `/delete_account` — delete this account"
+        )
+    else:
+        await _send(client, chat_id,
+            "─────────────────────────────\n"
+            "_You are a secondary device._\n"
+            "Contact the primary Telegram account to remove sessions or transfer primary status."
+        )
 
 
 async def process_update(client: httpx.AsyncClient, update: dict) -> None:
@@ -1616,23 +1795,69 @@ async def process_update(client: httpx.AsyncClient, update: dict) -> None:
             tl = text.strip().lower()
             if tl in ("register", "start register"):
                 await start_registration(client, chat_id)
-            elif tl in ("security", "sessions", "my sessions", "linked accounts"):
+            elif any(phrase in tl for phrase in (
+                "who is logged in", "who's logged in", "show devices", "show all devices",
+                "security", "sessions", "my sessions", "linked accounts",
+                "who logged in", "list devices", "list sessions", "show sessions",
+                "who can access", "active sessions",
+            )):
                 await _handle_security_menu(client, chat_id)
-            elif tl == "delete_account":
+            elif tl.startswith("make_primary ") or tl.startswith("/make_primary "):
+                # /make_primary @username or make_primary username
+                account = auth.get_account_by_telegram(chat_id)
+                primary_s = next((s for s in (account or {}).get("sessions",[]) if s.get("is_primary") and s.get("chat_id") == chat_id), None)
+                if not primary_s:
+                    await _send(client, chat_id, "❌ Only the current primary account can transfer primary status.")
+                else:
+                    target_uname = tl.split(" ", 1)[1].lstrip("@").strip()
+                    sessions = auth.get_sessions_for_account(account["email"])
+                    target_s = next((s for s in sessions if s.get("telegram_username","").lower() == target_uname.lower() and s.get("type") == "telegram"), None)
+                    if not target_s:
+                        await _send(client, chat_id, f"❌ No Telegram session found for @{target_uname}.\n\nType `security` to see all linked sessions.")
+                    elif target_s["session_id"] == primary_s["session_id"]:
+                        await _send(client, chat_id, "⭐ You are already the primary.")
+                    else:
+                        # Transfer primary
+                        db_p = load_database()
+                        acc_p = next((a for a in db_p.get("accounts",[]) if a["email"].lower() == account["email"].lower()), None)
+                        if acc_p:
+                            for s in acc_p.get("sessions", []):
+                                s["is_primary"] = (s["session_id"] == target_s["session_id"])
+                            save_database(db_p)
+                            await _send(client, chat_id,
+                                f"✅ *Primary transferred to @{target_uname}.*\n\n"
+                                f"They now hold primary status and can approve logins, transfers, and deletions."
+                            )
+                            # Notify new primary
+                            new_chat_id = target_s.get("chat_id")
+                            if new_chat_id:
+                                await _send(client, new_chat_id,
+                                    f"⭐ *You are now the PRIMARY account for {account['email']}!*\n\n"
+                                    "You can now approve new device logins and manage account settings."
+                                )
+            elif tl == "delete_account" or tl == "/delete_account":
                 account = auth.get_account_by_telegram(chat_id)
                 primary = next((s for s in (account or {}).get("sessions",[]) if s.get("is_primary") and s.get("chat_id") == chat_id), None)
                 if not primary:
                     await _send(client, chat_id, "❌ Only the primary Telegram account can delete the account.")
                 else:
-                    _set_state(chat_id, "confirm_delete")
+                    _set_state(chat_id, "confirm_delete_choice")
+                    kb = _inline_keyboard([
+                        [{"text": "🌿 Anonymise & keep AI data", "callback_data": "delete:keep"}],
+                        [{"text": "💣 Delete everything permanently", "callback_data": "delete:hard"}],
+                        [{"text": "❌ Cancel", "callback_data": "delete:cancel"}],
+                    ])
                     await _send(client, chat_id,
-                        "⚠️ *Are you sure?*\n\n"
-                        "This will permanently delete your account, restaurant data, and all sales history. "
-                        "This *cannot be undone*.\n\n"
-                        "Type *YES DELETE MY ACCOUNT* to confirm, or anything else to cancel."
+                        "⚠️ *Delete Account — Choose how:*\n\n"
+                        "🌿 *Anonymise & keep data* — Your restaurant info and PII are removed, "
+                        "but anonymised sales history is kept to help improve AI for other hawkers.\n\n"
+                        "💣 *Delete everything* — All data permanently erased. Cannot be undone.\n\n"
+                        "Which would you prefer?",
+                        reply_markup=kb
                     )
             elif tl == "yes delete my account":
-                if _get_state(chat_id) == "confirm_delete":
+                if _get_state(chat_id) in ("confirm_delete", "confirm_delete_hard"):
+                    keep_data = _get_state(chat_id) == "confirm_delete"
                     account = auth.get_account_by_telegram(chat_id)
                     if account:
                         email = account["email"]
@@ -1640,19 +1865,125 @@ async def process_update(client: httpx.AsyncClient, update: dict) -> None:
                         auth.delete_account(email)
                         if rest_id:
                             db3 = load_database()
-                            db3["restaurants"] = [r for r in db3.get("restaurants",[]) if r["id"] != rest_id]
+                            if keep_data:
+                                rest3 = next((r for r in db3.get("restaurants",[]) if r["id"] == rest_id), None)
+                                if rest3:
+                                    rest3["name"] = f"[Anonymised Stall {rest_id[-4:]}]"
+                                    rest3["owner_name"] = "[Anonymised]"
+                                    rest3["telegram_chat_id"] = None
+                                    rest3["telegram_username"] = None
+                                    rest3["_anonymised"] = True
+                            else:
+                                db3["restaurants"] = [r for r in db3.get("restaurants",[]) if r["id"] != rest_id]
                             save_database(db3)
                         _set_state(chat_id, None)
                         _clear_data(chat_id, "restaurant_id")
-                        await _send(client, chat_id,
-                            "✅ Your account and all data have been permanently deleted. "
-                            "Thank you for using WasteWise AI.")
+                        msg_del = ("✅ Your account has been anonymised. Sales data is kept to help other hawkers. Thank you! 🌿"
+                                   if keep_data else
+                                   "✅ Your account and all data have been permanently deleted. Thank you for using WasteWise AI.")
+                        await _send(client, chat_id, msg_del)
                     else:
                         _set_state(chat_id, None)
                         await _send(client, chat_id, "No account found to delete.")
                 else:
                     _set_state(chat_id, None)
                     await _send(client, chat_id, "Delete cancelled.")
+
+            # ── Chain Management Commands ──────────────────────────────────────────
+
+            elif tl.startswith("create chain") or tl.startswith("/create_chain"):
+                chain_name = tl.replace("create chain", "").replace("/create_chain", "").strip()
+                if not chain_name:
+                    await _send(client, chat_id, "Please specify a chain name.\n_Example: `create chain My Hawker Group`_")
+                else:
+                    account = auth.get_account_by_telegram(chat_id)
+                    if not account:
+                        await _send(client, chat_id, "❌ Please login first.")
+                    else:
+                        kb = _inline_keyboard([
+                            [{"text": "✅ Confirm Create Chain", "callback_data": f"chain:create:{chain_name[:20]}"}],
+                            [{"text": "❌ Cancel", "callback_data": "chain:cancel"}],
+                        ])
+                        await _send(client, chat_id,
+                            f"🔗 *Create chain: \"{chain_name}\"?*\n\n"
+                            "This will create a new restaurant chain. "
+                            "You can then add your restaurants as branches.\n\n"
+                            "_(No Telegram approval needed \u2014 you are already on Telegram!)_",
+                            reply_markup=kb
+                        )
+
+            elif any(phrase in tl for phrase in ("my chains", "show chains", "list chains", "my chain")):
+                account = auth.get_account_by_telegram(chat_id)
+                if not account:
+                    await _send(client, chat_id, "❌ Please login first.")
+                else:
+                    db_c = load_database()
+                    email_c = account["email"].lower()
+                    my_chains = [c for c in db_c.get("chains", []) if c.get("owner_email", "").lower() == email_c]
+                    if not my_chains:
+                        await _send(client, chat_id,
+                            "🔗 *No chains yet.*\n\n"
+                            "Type `create chain My Group Name` to create one.")
+                    else:
+                        lines = ["🔗 *Your Restaurant Chains*\n"]
+                        for ch in my_chains:
+                            cid = ch["chain_id"]
+                            branches = [r["name"] for r in db_c.get("restaurants",[]) if r.get("chain_id") == cid]
+                            lines.append(f"• *{ch.get('name',cid)}* ({ch.get('chain_type','franchise')})")
+                            lines.append(f"  ID: `{cid}`")
+                            lines.append(f"  Branches: {', '.join(branches) if branches else 'none'}")
+                        await _send(client, chat_id, "\n".join(lines))
+
+            elif tl.startswith("add to chain") or tl.startswith("/add_to_chain"):
+                rest_id_c = _get_rest_id(chat_id)
+                chain_ref = tl.replace("add to chain", "").replace("/add_to_chain", "").strip()
+                if not rest_id_c or not chain_ref:
+                    await _send(client, chat_id,
+                        "Usage: `add to chain chain_xxxxxxxx`\n"
+                        "Get your chain ID with `my chains`.")
+                else:
+                    db_c2 = load_database()
+                    chain_c2 = next((c for c in db_c2.get("chains",[]) if c["chain_id"] == chain_ref), None)
+                    if not chain_c2:
+                        await _send(client, chat_id, f"❌ Chain `{chain_ref}` not found. Check with `my chains`.")
+                    else:
+                        rest_obj = next((r for r in db_c2.get("restaurants",[]) if r["id"] == rest_id_c), None)
+                        if rest_obj:
+                            rest_obj["chain_id"] = chain_ref
+                            save_database(db_c2)
+                            await _send(client, chat_id,
+                                f"✅ *{rest_obj['name']}* added to chain *{chain_c2.get('name', chain_ref)}*!")
+                        else:
+                            await _send(client, chat_id, "❌ Could not find your restaurant.")
+
+            # ── Approve/Deny dashboard actions ────────────────────────────────────
+
+            elif tl.startswith("approve ") or tl.startswith("deny "):
+                parts = tl.split(" ", 1)
+                decision = parts[0] == "approve"
+                prefix = parts[1].strip() if len(parts) > 1 else ""
+                if prefix:
+                    # Directly mutate the in-process pending approvals dict (same process — no HTTP needed)
+                    try:
+                        from main import _pending_dashboard_approvals
+                        match = next(
+                            ((tok, e) for tok, e in _pending_dashboard_approvals.items()
+                             if tok.startswith(prefix) and e["primary_chat_id"] == chat_id),
+                            None,
+                        )
+                        if not match:
+                            await _send(client, chat_id, "⚠️ Approval request not found or already handled.")
+                        else:
+                            token, entry = match
+                            entry["status"] = "approved" if decision else "denied"
+                            emoji = "✅" if decision else "❌"
+                            await _send(client, chat_id,
+                                f"{emoji} Dashboard action *{entry.get('action','')}* "
+                                f"{'approved' if decision else 'denied'}."
+                            )
+                    except Exception as _e_ap:
+                        await _send(client, chat_id, f"⚠️ Could not process approval: {_e_ap}")
+
             elif tl.startswith("remove_") and len(tl) > 7:
                 session_prefix = tl[7:]
                 account = auth.get_account_by_telegram(chat_id)

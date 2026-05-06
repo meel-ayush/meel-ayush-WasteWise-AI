@@ -95,6 +95,13 @@ def get_sessions_for_account(email: str) -> list:
     return active
 
 
+def get_any_token_for_email(email: str) -> Optional[str]:
+    """Return any active web session token for this account (used internally by the bot)."""
+    sessions = get_sessions_for_account(email)
+    web = [s for s in sessions if s.get('type') == 'web' and s.get('session_id')]
+    return web[0]['session_id'] if web else None
+
+
 def email_registered(email: str) -> bool:
     return get_account_by_email(email) is not None
 
@@ -414,3 +421,39 @@ def clean_expired(db: dict) -> None:
 
 
 # =============================================================================
+# HELPERS
+# =============================================================================
+
+def get_any_token_for_email(email: str) -> Optional[str]:
+    """Return any active web session token for this account (used internally by the bot)."""
+    sessions = get_sessions_for_account(email)
+    web = [s for s in sessions if s.get('type') == 'web' and s.get('session_id')]
+    return web[0]['session_id'] if web else None
+
+
+def _sync_push_session_to_supabase(email: str, session_data: dict):
+    """
+    Synchronously push a newly created session to Supabase.
+    This prevents the race condition where the frontend requests /api/auth/me
+    before the background thread finishes pushing the session to the DB.
+    """
+    from services.supabase_db import _sb
+    if not _sb:
+        return
+    try:
+        acc_res = _sb.table("accounts").select("id").eq("email", email).execute()
+        if acc_res.data:
+            _sb.table("sessions").upsert({
+                "session_id": session_data["session_id"],
+                "account_id": acc_res.data[0]["id"],
+                "type": session_data["type"],
+                "chat_id": session_data.get("chat_id"),
+                "telegram_username": session_data.get("telegram_username"),
+                "label": session_data.get("label", ""),
+                "is_primary": session_data.get("is_primary", False),
+                "linked_at": session_data.get("linked_at"),
+                "last_active": session_data.get("last_active"),
+                "expires_at": session_data.get("expires_at")
+            }).execute()
+    except Exception as e:
+        print(f"[Auth] Sync session push failed: {e}")

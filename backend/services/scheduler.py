@@ -251,7 +251,7 @@ def _run_closing_time_check(bot_token: str) -> None:
         sent_at_str = restaurant.get(f"pre_closing_sent_at_{today_str}", "")
         if awaiting_s1 and sent_at_str:
             try:
-                sent_at = datetime.datetime.fromisoformat(sent_at_str)
+                sent_at = datetime.datetime.fromisoformat(str(sent_at_str).replace("Z", "+00:00")).replace(tzinfo=None)
                 mins_since_sent = int((now - sent_at).total_seconds() / 60)
                 if mins_since_sent >= 30:
                     print(f"[Scheduler] No Stage 1 reply from {restaurant['name']} after 30min — auto-generating")
@@ -325,7 +325,7 @@ def _check_pending_orders(bot_token: str) -> None:
                 continue  # Old order without deadline — skip
 
             try:
-                deadline_dt = datetime.datetime.fromisoformat(deadline_str)
+                deadline_dt = datetime.datetime.fromisoformat(str(deadline_str).replace("Z", "+00:00")).replace(tzinfo=None)
             except Exception:
                 continue
 
@@ -442,6 +442,8 @@ def _scheduler_loop(bot_token: str) -> None:
             print(f"[Scheduler] Order check error: {e}")
 
         time.sleep(30)
+
+
 
 
 def start_scheduler(bot_token: str) -> None:
