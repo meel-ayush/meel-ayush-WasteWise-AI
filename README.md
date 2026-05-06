@@ -118,6 +118,9 @@ Features are split by where they are accessible today.
 | 🤖 **Demand Forecasting** | Holt-Winters + ensemble ML, up to 95% accuracy, weekly auto-retraining |
 | ⚡ **Autonomous Pricing Agent** | Runs every 15 min (6 AM–11 PM) — adjusts discounts from 10 factors: weather, prayer times, inventory, closing urgency, day-of-week, events, and more |
 | 🛒 **Closing Stock Marketplace** | Customers browse discounted items → order → Telegram alert to hawker → 45-min pickup window |
+| 📦 **Daily Order Numbers** | Each order gets a short daily #N reset at midnight — hawker replies `done 3` or `miss 3` instead of long order IDs |
+| 📊 **Orders Dashboard Panel** | Real-time view of today's pending/completed/cancelled orders with status controls |
+| 🔗 **Chain Management Panel** | Create chains, add/remove branches, push menu templates — with Telegram primary approval for destructive actions |
 | 🔬 **Causal AI Root-Cause** | SCM + ITS + Bayesian ATT explains *why* yesterday underperformed (rain / day-of-week / events / unexplained residual) |
 | 📊 **BCG Menu Engineering** | Stars / Ploughhorses / Puzzles / Dogs matrix with HHI concentration and cannibalization detection |
 | 📷 **Computer Vision Inventory** | Upload a shelf photo — Gemini Vision + EasyOCR detects ingredients and cross-references your BOM |
@@ -126,13 +129,23 @@ Features are split by where they are accessible today.
 | 🧠 **Multi-Intent NLP** | One Telegram message can contain multiple commands — all executed in a single reply |
 | 🗓️ **Event Registration** | Log upcoming events (festivals, market days) so the AI adjusts forecasts proactively |
 
+### 🔐 Security & Administration
+
+| Feature | Detail |
+|---|---|
+| 🔑 **Primary Account Model** | One Telegram account is designated Primary per restaurant — only they can approve destructive actions |
+| 📱 **Inline Session Management** | Telegram bot shows all logged-in devices with ⭐ Make Primary and 🗑 Remove buttons — no manual typing required |
+| ✅ **Dashboard Action Approval** | Delete restaurant, delete chain, create chain, add/remove branch — all require Primary Telegram confirmation |
+| 🛡️ **OTP Rate Limiting** | Failed OTP attempts are tracked and blocked — no brute-force possible |
+| 🔒 **Input Sanitisation** | All user inputs validated + sanitised before DB writes — prevents injection attacks |
+| 📝 **Full Audit Trail** | Every write operation logged with timestamp, email, endpoint, and IP address |
+
 ### ⚙️ Live in Telegram Bot Only *(no dashboard UI yet — see [Work in Progress](#-work-in-progress))*
 
 | Feature | Detail |
 |---|---|
 | 🎮 **Gamification** | Streaks, badges, accuracy milestones sent via Telegram after each daily log |
 | 🏆 **Regional Leaderboard** | Anonymous weekly waste-reduction ranking among hawkers in the same region |
-| 🏢 **Multi-Branch Chain Management** | Create chains, link branches, transfer inventory, cross-branch anomaly alerts |
 | 🌿 **Sustainability Tracking** | CO₂ saved counter, monthly environmental report, tree-equivalent calculation |
 | 🧬 **Federated Learning** | 2-layer MLP + FedAvg + Laplace DP — model improves across restaurants without sharing raw data |
 | 🧾 **BOM Detail Editor** | Full bill-of-materials with ingredient costs and supplier notes — managed via bot commands |
@@ -163,7 +176,7 @@ WasteWise-AI/
 │   └── marketplace.png                  ← Public customer marketplace
 │
 ├── backend/                             ← FastAPI server — deploy to Hugging Face
-│   ├── main.py                          ← App entry point — all 42 API routes (75 KB)
+│   ├── main.py                          ← App entry point — 50+ API routes (enterprise-hardened)
 │   ├── Dockerfile                       ← Container config for Hugging Face Spaces (port 7860)
 │   ├── requirements.txt                 ← All Python dependencies (pinned versions)
 │   ├── .env.example                     ← Template for every environment variable
@@ -171,39 +184,39 @@ WasteWise-AI/
 │   └── services/
 │       ├── ai_provider.py               ← Gemini → Groq → Mistral 3-tier fallback chain
 │       ├── audit.py                     ← Request / response audit middleware
-│       ├── auth.py                      ← OTP issuance, JWT signing, session management
+│       ├── auth.py                      ← OTP issuance, session management, primary account logic
 │       ├── bom_ai.py                    ← Bill-of-Materials AI generator
 │       ├── cache.py                     ← In-memory dict cache (Redis fallback)
 │       ├── cache_layer.py               ← Unified Redis ↔ memory cache interface
 │       ├── causal_ai.py                 ← SCM + ITS + Bayesian ATT causal inference engine
 │       ├── chain_management.py          ← Multi-branch chain creation, analytics, transfer logic
 │       ├── computer_vision_inventory.py ← Gemini Vision + EasyOCR shelf-photo scanning
-│       ├── data_miner.py                ← Holt-Winters forecasting, waste metrics, BOM (56 KB)
+│       ├── data_miner.py                ← Holt-Winters forecasting, waste metrics, BOM
 │       ├── email_service.py             ← Resend transactional email for OTP delivery
 │       ├── federated_learning.py        ← 2-layer MLP + FedAvg + Laplace differential privacy
 │       ├── file_processor.py            ← PDF / DOCX / XLSX upload and text extraction
 │       ├── gamification.py              ← Streak tracking, badges, regional leaderboard logic
-│       ├── inventory.py                 ← Marketplace listings, surge pricing, order lifecycle (27 KB)
-│       ├── location_intel.py            ← Geocoding, foot-traffic analysis, weather fetch (13 KB)
+│       ├── inventory.py                 ← Marketplace listings, surge pricing, order lifecycle
+│       ├── location_intel.py            ← Geocoding, foot-traffic analysis, weather fetch
 │       ├── marketplace_auth.py          ← Customer-facing OTP auth for order tracking
-│       ├── menu_engineering.py          ← BCG matrix, HHI, cannibalization detection (12 KB)
+│       ├── menu_engineering.py          ← BCG matrix, HHI, cannibalization detection
 │       ├── migrations.py                ← Database schema migration runner
-│       ├── nlp.py                       ← Multi-intent NLP engine, 20+ intents, 4 languages (39 KB)
+│       ├── nlp.py                       ← Multi-intent NLP engine, 20+ intents, 4 languages
 │       ├── pricing_agent.py             ← Autonomous 15-min pricing intelligence agent
-│       ├── scheduler.py                 ← 6 APScheduler background jobs (19 KB)
-│       ├── security.py                  ← Auth guards, IDOR prevention, rate limiting (12 KB)
+│       ├── scheduler.py                 ← 6 background jobs (closing alerts, pricing, autotuning)
+│       ├── security.py                  ← Auth guards, IDOR prevention, rate limiting
 │       ├── storage_service.py           ← Supabase Storage / S3 bucket manager
-│       ├── supabase_db.py               ← Supabase + local JSON hybrid DB layer (33 KB)
+│       ├── supabase_db.py               ← Supabase + local JSON hybrid DB layer
 │       ├── sustainability.py            ← Carbon footprint scoring, CO₂ equivalence
 │       ├── task_queue.py                ← Celery / APScheduler task dispatcher
-│       ├── telegram_bot.py              ← Complete Telegram bot handler (85 KB)
+│       ├── telegram_bot.py              ← Complete Telegram bot handler (inline buttons, NLP, security UI)
 │       └── __init__.py                  ← Services package init
 │
 └── dashboard/                           ← Next.js 15 frontend — deploy to Vercel
     ├── package.json                     ← Node.js dependencies and scripts
     ├── next.config.ts                   ← Next.js configuration
     ├── tsconfig.json                    ← TypeScript compiler options
-    ├── postcss.config.mjs               ← PostCSS / Tailwind config
+    ├── postcss.config.mjs               ← PostCSS config
     ├── next-env.d.ts                    ← Next.js TypeScript declarations
     └── src/app/
         ├── globals.css                  ← Global CSS styles
@@ -211,10 +224,12 @@ WasteWise-AI/
         ├── page.tsx                     ← Entry point — auth routing + 30-day cookie session
         ├── components/
         │   ├── AuthScreen.tsx           ← Login / register screen toggle wrapper
-        │   ├── Dashboard.tsx            ← Main owner dashboard — all tabs (48 KB)
+        │   ├── ChainsPanel.tsx          ← Chain management panel (create, view, manage branches)
+        │   ├── Dashboard.tsx            ← Main owner dashboard — all tabs including Orders & Chains
         │   ├── FileIntentModal.tsx      ← Modal to choose intent after file upload
         │   ├── LoginFlow.tsx            ← Email OTP login flow
         │   ├── Modal.tsx                ← Reusable modal component
+        │   ├── OrdersPanel.tsx          ← Real-time orders panel with status management
         │   ├── ProfitTab.tsx            ← Sales & profit breakdown tab
         │   ├── RegisterFlow.tsx         ← Multi-step registration with admin approval
         │   ├── StoreSettings.tsx        ← Marketplace listings, closing time, item photos
@@ -222,7 +237,7 @@ WasteWise-AI/
         ├── customer/
         │   └── page.tsx                 ← Customer-facing order tracking page
         └── marketplace/
-            └── page.tsx                 ← Public marketplace storefront (30 KB)
+            └── page.tsx                 ← Public marketplace storefront
 ```
 
 ---
@@ -405,7 +420,6 @@ The features below are **fully implemented in the backend and Telegram bot** but
 |---|---|---|
 | 🎮 **Gamification** — streaks, badges, accuracy milestones | Telegram bot — delivered after each daily log | Dashboard widget coming |
 | 🏆 **Regional Leaderboard** — anonymous weekly waste-reduction ranking | Telegram bot — sent in Sunday briefing; requires 5+ restaurants in same region | Dashboard page coming |
-| 🏢 **Chain Management** — create chains, link/remove branches, cross-branch analytics, inventory transfer | Telegram bot + REST API | Dashboard UI coming |
 | 🌿 **Sustainability Tracking** — CO₂ saved, monthly environmental report, tree equivalent | Telegram bot — monthly summary message | Dashboard tab coming |
 | 🧬 **Federated Learning** — model improvement across restaurants with differential privacy | Admin API endpoint (`POST /api/admin/federated_round`) | Automated scheduling coming |
 | 🧾 **BOM Detail Editor** — full bill of materials with ingredient costs and supplier notes | Telegram bot commands + API | Dashboard UI coming |
