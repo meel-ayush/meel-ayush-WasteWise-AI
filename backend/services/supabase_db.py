@@ -423,7 +423,8 @@ def _push_to_supabase(db: dict) -> None:
             "updated_at": now,
         }, on_conflict="id").execute()
 
-        # ── Menu items: BATCH upsert (1 call instead of N) ───────────────
+        # ── Menu items: batch delete then batch insert ───────────────
+        _sb.table("restaurant_menu").delete().eq("restaurant_id", rid).execute()
         menu_rows = [
             {"restaurant_id": rid, "item": item["item"],
              "base_daily_demand": item.get("base_daily_demand", 50),
@@ -433,7 +434,7 @@ def _push_to_supabase(db: dict) -> None:
             for item in rest.get("menu", [])
         ]
         if menu_rows:
-            _sb.table("restaurant_menu").upsert(menu_rows, on_conflict="restaurant_id,item").execute()
+            _sb.table("restaurant_menu").insert(menu_rows).execute()
 
         # ── Daily records: BATCH upsert ───────────────────────────────────
         daily_rows = []
@@ -480,25 +481,30 @@ def _push_to_supabase(db: dict) -> None:
         if ev_rows:
             _sb.table("active_events").insert(ev_rows).execute()
 
-        # Closing stock
-        for s in rest.get("closing_stock", []):
-            stock_date = rest.get("closing_stock_date", "")
-            if not stock_date:
-                continue
-            _sb.table("closing_stock").upsert({
-                "restaurant_id": rid,
-                "stock_date": stock_date,
-                "stock_time": rest.get("closing_stock_time"),
-                "item": s["item"],
-                "qty_available": s.get("qty_available", 0),
-                "original_price_rm": s.get("original_price_rm", 0),
-                "discounted_price_rm": s.get("discounted_price_rm", 0),
-                "discount_pct": s.get("discount_pct", 30),
-            }, on_conflict="restaurant_id,stock_date,item").execute()
+        # Closing stock: batch delete then batch insert
+        _sb.table("closing_stock").delete().eq("restaurant_id", rid).execute()
+        stock_rows = []
+        stock_date = rest.get("closing_stock_date", "")
+        if stock_date:
+            for s in rest.get("closing_stock", []):
+                stock_rows.append({
+                    "restaurant_id": rid,
+                    "stock_date": stock_date,
+                    "stock_time": rest.get("closing_stock_time"),
+                    "item": s["item"],
+                    "qty_available": s.get("qty_available", 0),
+                    "original_price_rm": s.get("original_price_rm", 0),
+                    "discounted_price_rm": s.get("discounted_price_rm", 0),
+                    "discount_pct": s.get("discount_pct", 30),
+                })
+            if stock_rows:
+                _sb.table("closing_stock").insert(stock_rows).execute()
 
-        # Marketplace orders
+        # Marketplace orders: batch delete then batch insert
+        _sb.table("marketplace_orders").delete().eq("restaurant_id", rid).execute()
+        order_rows = []
         for o in rest.get("marketplace_orders", []):
-            _sb.table("marketplace_orders").upsert({
+            order_rows.append({
                 "order_id": o.get("order_id", ""),
                 "restaurant_id": rid,
                 "order_date": o.get("date", ""),
@@ -509,7 +515,9 @@ def _push_to_supabase(db: dict) -> None:
                 "shopkeeper_earnings_rm": o.get("shopkeeper_earnings_rm", 0),
                 "platform_fee_rm": o.get("platform_fee_rm", 0),
                 "status": o.get("status", "pending"),
-            }, on_conflict="order_id").execute()
+            })
+        if order_rows:
+            _sb.table("marketplace_orders").insert(order_rows).execute()
 
     # ── Accounts + Sessions ───────────────────────────────────────────────────
     for acct in db.get("accounts", []):
