@@ -142,9 +142,16 @@ def save_database(db: dict) -> None:
         try:
             _push_queue.put_nowait(snapshot)
         except _queue.Full:
-            # Queue already has a pending push — the worker will pick it up.
-            # This is expected under burst load; data is safe in Redis + JSON.
-            log.warning("Supabase push queue full — worker is busy. Data is safe in Redis/JSON cache.")
+            # Production Fix: Always keep the most recent snapshot. Drop the old one.
+            try:
+                _push_queue.get_nowait()
+            except _queue.Empty:
+                pass
+            
+            try:
+                _push_queue.put_nowait(snapshot)
+            except _queue.Full:
+                log.warning("Supabase push queue full. Data is safe in Redis/JSON cache.")
 
 
 def invalidate_cache() -> None:
