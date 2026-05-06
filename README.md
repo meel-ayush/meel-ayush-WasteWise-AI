@@ -213,6 +213,7 @@ WasteWise-AI/
 │       └── __init__.py                  ← Services package init
 │
 └── dashboard/                           ← Next.js 15 frontend — deploy to Vercel
+    ├── .env.example                     ← Template for local frontend variables
     ├── package.json                     ← Node.js dependencies and scripts
     ├── next.config.ts                   ← Next.js configuration
     ├── tsconfig.json                    ← TypeScript compiler options
@@ -277,14 +278,21 @@ cd WasteWise-AI
 | Variable | Where to get it | Required? |
 |---|---|:---:|
 | `SECRET_KEY` | `cd backend && python keygen.py` — copy the output | ✅ |
+| `ALLOWED_ORIGINS` | The URL of your Vercel Dashboard (e.g. `https://my-app.vercel.app`) | ✅ |
 | `TELEGRAM_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` → copy token | ✅ |
+| `BOT_USERNAME` | [@BotFather](https://t.me/BotFather) → Your bot's exact username | ✅ |
+| `WEBHOOK_SECRET` | Create your own secure, random password (used to secure the Telegram webhook) | ✅ |
 | `GEMINI_API_KEY` | [aistudio.google.com](https://aistudio.google.com) → **Get API Key** | ✅ |
 | `SUPABASE_URL` | Supabase → **Settings → API** | ✅ |
 | `SUPABASE_SERVICE_KEY` | Supabase → **Settings → API** → `service_role` | ✅ |
+| `ADMIN_EMAIL` | Your personal email for root administrative access | Recommended |
+| `FROM_EMAIL` | Resend configured sender email (e.g., `onboarding@resend.dev`) | Recommended |
+| `RESEND_API_KEY` | [resend.com](https://resend.com) → **API Keys** | Recommended |
 | `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) → **API Keys** | Recommended |
 | `MISTRAL_API_KEY` | [console.mistral.ai](https://console.mistral.ai) → **API Keys** | Recommended |
-| `RESEND_API_KEY` | [resend.com](https://resend.com) → **API Keys** | Recommended |
 | `REDIS_URL` | [upstash.com](https://upstash.com) → **Create Database** → copy URL | Optional |
+| `CELERY_BROKER_URL` | Redis URL (Upstash Free uses `/0`. Paid uses `/0`) | Optional |
+| `CELERY_RESULT_BACKEND` | Redis URL (Upstash Free uses `/0`. Paid uses `/1`) | Optional |
 | `LOCATIONIQ_API_KEY` | [locationiq.com](https://locationiq.com) → **Access Tokens** | Optional |
 | `GEOAPIFY_API_KEY` | [geoapify.com](https://geoapify.com) → **Projects** → **API Key** | Optional |
 
@@ -299,6 +307,18 @@ cd backend
 cp .env.example .env
 # Open .env and fill in your keys
 ```
+
+---
+
+### Step 5 — Register Telegram Webhook (Production Only)
+
+If deploying to a cloud provider (e.g., Hugging Face, Vercel, Railway), you must register your webhook URL so Telegram knows where to push messages.
+
+Open a web browser and visit this URL, replacing the placeholders with your actual values:
+```text
+https://api.telegram.org/bot<YOUR_TELEGRAM_TOKEN>/setWebhook?url=<YOUR_DEPLOYMENT_URL>/webhook&secret_token=<YOUR_WEBHOOK_SECRET>
+```
+*Note: Your `WEBHOOK_SECRET` must contain only alphanumeric characters or underscores, and be exactly 1-256 characters long.*
 
 ```env
 # ── MANDATORY ──────────────────────────────────────────────────
@@ -326,17 +346,21 @@ BOT_USERNAME=          # Telegram bot @username (without @)
 ADMIN_EMAIL=           # admin account for federated learning trigger
 ```
 
-**Frontend:**
+**Frontend Setup:**
 
-```bash
-cd dashboard
-echo "NEXT_PUBLIC_API_URL=http://localhost:8000" > .env.local
-# Replace with your Hugging Face URL for production
-```
+To run the Next.js dashboard, you need to set the `NEXT_PUBLIC_API_URL` variable to point to your backend.
+
+* **Running Locally**: 
+  ```bash
+  cd dashboard
+  cp .env.example .env.local
+  # .env.local defaults to http://localhost:8000
+  ```
+* **Deploying to Vercel**: Do not commit `.env.local` to GitHub. Instead, go to your Vercel Project Settings → Environment Variables and add `NEXT_PUBLIC_API_URL` = `https://your-backend.hf.space`.
 
 ---
 
-### Step 5 — Run Locally
+### Step 6 — Run Locally
 
 ```bash
 # Terminal 1 — Backend
@@ -350,12 +374,6 @@ cd dashboard
 npm install
 npm run dev
 # Dashboard → http://localhost:3000
-```
-
-**Register the Telegram webhook** (run once, after backend is publicly accessible):
-
-```bash
-curl "https://YOUR_BACKEND_URL.hf.space/api/set_webhook"
 ```
 
 ---
@@ -372,10 +390,6 @@ curl "https://YOUR_BACKEND_URL.hf.space/api/set_webhook"
    ```
 3. **Settings → Variables and secrets** → add every key from your `.env`.
 4. Hugging Face reads the `Dockerfile` and starts Uvicorn on port 7860 automatically.
-5. Register the Telegram webhook once your Space is live:
-   ```
-   https://YOUR_HF_USERNAME-wastewise-backend.hf.space/api/set_webhook
-   ```
 
 ### Frontend → Vercel
 
