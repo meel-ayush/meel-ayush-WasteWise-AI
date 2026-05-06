@@ -4,23 +4,29 @@ import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContaine
 import {
   Leaf, LogOut, Upload, CalendarDays, PlusCircle, BarChart2,
   Loader2, Trash2, RefreshCw, ShieldCheck, Volume2, DollarSign, Store,
-  Brain, Camera, Zap,
+  Brain, Camera, Zap, ShoppingBag, Link2, Monitor, Smartphone, Globe,
 } from "lucide-react";
 import Modal from "./Modal";
 import FileIntentModal from "./FileIntentModal";
 import VoicePanel from "./VoicePanel";
 import ProfitTab from "./ProfitTab";
 import StoreSettings from "./StoreSettings";
+import OrdersPanel from "./OrdersPanel";
+import ChainsPanel from "./ChainsPanel";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 type FileIntent = "none"|"sales"|"append"|"overwrite";
-type TabKey = "upload"|"event"|"addItem"|"profit"|"store"|"insights"|"scan";
+type TabKey = "upload"|"event"|"addItem"|"profit"|"store"|"orders"|"chains"|"insights"|"scan";
 
 type MenuItem  = { item:string; base_daily_demand:number; profit_margin_rm:number };
 type Restaurant = { id:string; name:string; region:string; menu:MenuItem[]; active_events:any[] };
 type AccuracyRec = { date:string; day:string; total_actual:number };
 type DashboardData = { restaurant:Restaurant; region_info:{type?:string}; ai_forecast_message:string; accuracy_data:AccuracyRec[] };
-type Session = { session_id:string; type:string; label:string; is_primary:boolean; expires_at:string|null };
+type Session = {
+  session_id:string; type:string; label:string; is_primary:boolean;
+  expires_at:string|null; chat_id?:number; telegram_username?:string;
+  device_info?:string;
+};
 type IntelData = {
   item_trends: Record<string,{trend_dir:string;trend_pct:number;recommended_qty:number;confidence:string;has_anomaly:boolean;anomaly_note:string}>;
   mape_per_item: Record<string,{mape:number;bias:number;n:number}>;
@@ -56,6 +62,12 @@ export default function Dashboard({ token, restaurantId, email, onLogout }: {tok
   const [scanFile, setScanFile]     = useState<File|null>(null);
   const [scanResult, setScanResult] = useState<any>(null);
   const [scanLoading, setScanLoading] = useState(false);
+  // Security modal state
+  const [makingPrimary, setMakingPrimary] = useState<string|null>(null);
+  const [deleteRestFlow, setDeleteRestFlow] = useState(false);
+  const [deleteApprovalToken, setDeleteApprovalToken] = useState<string|null>(null);
+  const [deleteApprovalStatus, setDeleteApprovalStatus] = useState<"idle"|"pending"|"approved"|"denied">("idle");
+  const [deleteKeepData, setDeleteKeepData] = useState(true);
   const prevForecast = useRef("");
   const pollRef      = useRef<NodeJS.Timeout|null>(null);
 
@@ -71,7 +83,7 @@ export default function Dashboard({ token, restaurantId, email, onLogout }: {tok
       fetch(`${API}/api/shopping_list/${restaurantId}`, { headers: {"Authorization": `Bearer ${token}`} }).then(r=>r.ok?r.json():null).then(d=>{if(d)setShopping(d.shopping_list||[]);}).catch(()=>null);
       return j.ai_forecast_message;
     } catch {
-      if (!silent) setStatus("❌ Cannot reach backend. Make sure uvicorn is running on port 8000.");
+      if (!silent) setStatus("❌ Cannot reach the server. Please check your connection or try again later.");
       return null;
     }
   }, [restaurantId]);
@@ -126,9 +138,63 @@ export default function Dashboard({ token, restaurantId, email, onLogout }: {tok
   };
 
   const removeSession = async (sessionId:string) => {
-    await fetch(`${API}/api/auth/session/${sessionId}`,{method:"DELETE",headers:{"Authorization":`Bearer ${token}`}});
+    const r = await fetch(`${API}/api/auth/session/${sessionId}`,{method:"DELETE",headers:{"Authorization":`Bearer ${token}`}});
+    if (!r.ok) { const e = await r.json().catch(()=>({})); setStatus("❌ "+(e.detail||"Could not remove session.")); }
     fetchSessions();
   };
+
+  const makePrimarySession = async (sessionId:string) => {
+    setMakingPrimary(sessionId);
+    const r = await fetch(`${API}/api/auth/session/${sessionId}/make_primary`,{method:"PATCH",headers:{"Authorization":`Bearer ${token}`}});
+    if (r.ok) { setStatus("✅ Primary transferred."); fetchSessions(); }
+    else { const e = await r.json().catch(()=>({})); setStatus("❌ "+(e.detail||"Could not transfer primary.")); }
+    setMakingPrimary(null);
+  };
+
+  const requestDeleteApproval = async (keepData: boolean) => {
+    setDeleteKeepData(keepData);
+    setDeleteApprovalStatus("pending");
+    try {
+      const r = await fetch(`${API}/api/auth/dashboard_action/request?action=delete_restaurant&restaurant_id=${restaurantId}`,
+        { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+      if (r.ok) { const j = await r.json(); setDeleteApprovalToken(j.approval_token); }
+      else { setDeleteApprovalStatus("idle"); }
+    } catch { setDeleteApprovalStatus("idle"); }
+  };
+
+  // Poll delete approval
+  useEffect(() => {
+    if (!deleteApprovalToken) return;
+    const i = setInterval(async () => {
+      try {
+        const r = await fetch(`${API}/api/auth/dashboard_action/status/${deleteApprovalToken}`,
+          { headers: { Authorization: `Bearer ${token}` } });
+        if (r.ok) {
+          const j = await r.json();
+          if (j.status === "approved") {
+            setDeleteApprovalStatus("approved");
+            clearInterval(i);
+            setDeleteApprovalToken(null);
+            // Execute delete
+            const dr = await fetch(`${API}/api/restaurant/${restaurantId}`, {
+              method: "DELETE",
+              headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ keep_data: deleteKeepData, delete_entire_chain: false }),
+            });
+            if (dr.ok) { onLogout(); }
+            else { const e = await dr.json().catch(()=>({})); setStatus("❌ "+(e.detail||"Delete failed.")); }
+          } else if (j.status === "denied") {
+            setDeleteApprovalStatus("denied");
+            clearInterval(i);
+            setDeleteApprovalToken(null);
+            setStatus("❌ Delete rejected by primary Telegram account.");
+          }
+        }
+      } catch {}
+    }, 3000);
+    return () => clearInterval(i);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deleteApprovalToken]);
 
   const runCausalAnalysis = async (targetDate?:string) => {
     setInsightsLoading(true); setInsightsStatus("🔍 Analysing root cause…"); setCausalResult(null);
@@ -231,6 +297,8 @@ export default function Dashboard({ token, restaurantId, email, onLogout }: {tok
     {key:"addItem"  as TabKey,icon:<PlusCircle size={14}/>,label:"Add Item"},
     {key:"profit"   as TabKey,icon:<DollarSign size={14}/>,label:"Sales & Profit"},
     {key:"store"    as TabKey,icon:<Store size={14}/>,label:"Marketplace"},
+    {key:"orders"   as TabKey,icon:<ShoppingBag size={14}/>,label:"Orders"},
+    {key:"chains"   as TabKey,icon:<Link2 size={14}/>,label:"Chains"},
     {key:"insights" as TabKey,icon:<Brain size={14}/>,label:"AI Insights"},
     {key:"scan"     as TabKey,icon:<Camera size={14}/>,label:"Scan Stock"},
   ];
@@ -243,21 +311,80 @@ export default function Dashboard({ token, restaurantId, email, onLogout }: {tok
       )}
 
       {showSecurity && (
-        <Modal onClose={()=>setShowSecurity(false)}>
+        <Modal onClose={()=>{setShowSecurity(false);setDeleteRestFlow(false);setDeleteApprovalStatus("idle");}}>
           <h2 style={{margin:"0 0 14px",fontSize:"1rem",fontWeight:700}}>🔐 Account Security</h2>
-          <p style={{margin:"0 0 6px",fontSize:"0.8rem",color:"var(--txt3)"}}>{email}</p>
-          <div style={{display:"flex",flexDirection:"column",gap:"8px",maxHeight:"320px",overflowY:"auto"}}>
-            {sessions.map(s=>(
-              <div key={s.session_id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",background:"var(--input)",borderRadius:"8px"}}>
-                <div>
-                  <p style={{margin:0,fontSize:"0.85rem",fontWeight:500}}>{s.is_primary?"⭐ ":"🔗 "}{s.type==="telegram"?`@${s.label}`:s.label||"Web session"}</p>
-                  <p style={{margin:0,fontSize:"0.75rem",color:"var(--txt3)"}}>{s.is_primary?"Primary · never expires":s.expires_at?`Expires ${s.expires_at.slice(0,10)}`:""}</p>
+          <p style={{margin:"0 0 12px",fontSize:"0.8rem",color:"var(--txt3)"}}>{email}</p>
+          <div style={{display:"flex",flexDirection:"column",gap:"8px",maxHeight:"360px",overflowY:"auto"}}>
+            {sessions.map(s=>{
+              const isTelegram = s.type==="telegram";
+              const isWeb = s.type==="web" || !s.type;
+              const iAmPrimary = sessions.some(x=>x.is_primary && x.session_id===token.substring(0,8));
+              return (
+                <div key={s.session_id} style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"10px 12px",background:"var(--input)",borderRadius:"8px",gap:"10px"}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:"flex",alignItems:"center",gap:"6px",marginBottom:"2px"}}>
+                      {s.is_primary && <span style={{fontSize:"0.7rem",background:"rgba(16,185,129,0.2)",color:"var(--green)",padding:"1px 6px",borderRadius:"20px",fontWeight:700}}>⭐ PRIMARY</span>}
+                      {isTelegram && <Smartphone size={12} color="#3b82f6"/>}
+                      {isWeb && <Globe size={12} color="var(--txt3)"/>}
+                      <p style={{margin:0,fontSize:"0.85rem",fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                        {isTelegram ? `@${s.telegram_username||s.label||"Telegram"}` : s.label||"Web session"}
+                      </p>
+                    </div>
+                    <p style={{margin:0,fontSize:"0.72rem",color:"var(--txt3)"}}>
+                      {s.is_primary?"Primary · never expires":s.expires_at?`Exp. ${s.expires_at.slice(0,10)}`:""}
+                    </p>
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:"4px",flexShrink:0}}>
+                    {!s.is_primary && (
+                      <button onClick={()=>removeSession(s.session_id)} style={{background:"transparent",border:"1px solid #ef4444",color:"#ef4444",borderRadius:"6px",padding:"3px 9px",cursor:"pointer",fontSize:"0.75rem"}}>Remove</button>
+                    )}
+                    {isTelegram && !s.is_primary && iAmPrimary && (
+                      <button onClick={()=>makePrimarySession(s.session_id)} disabled={makingPrimary===s.session_id}
+                        style={{background:"transparent",border:"1px solid var(--green)",color:"var(--green)",borderRadius:"6px",padding:"3px 9px",cursor:"pointer",fontSize:"0.75rem"}}>
+                        {makingPrimary===s.session_id?"…":"Make Primary"}
+                      </button>
+                    )}
+                  </div>
                 </div>
-                {!s.is_primary && <button onClick={()=>removeSession(s.session_id)} style={{background:"transparent",border:"1px solid #ef4444",color:"#ef4444",borderRadius:"6px",padding:"4px 10px",cursor:"pointer",fontSize:"0.78rem"}}>Remove</button>}
-              </div>
-            ))}
+              );
+            })}
           </div>
-          <p style={{margin:"14px 0 0",fontSize:"0.75rem",color:"var(--txt3)"}}>Non-primary sessions auto-expire after 30 days.</p>
+          <p style={{margin:"12px 0 0",fontSize:"0.72rem",color:"var(--txt3)"}}>Web sessions expire after 30 days. Telegram primary never expires.</p>
+          <hr style={{border:"none",borderTop:"1px solid var(--bdr)",margin:"14px 0"}}/>
+          {!deleteRestFlow ? (
+            <button onClick={()=>setDeleteRestFlow(true)}
+              style={{width:"100%",padding:"10px",borderRadius:"8px",background:"rgba(239,68,68,0.1)",color:"#ef4444",border:"1px solid rgba(239,68,68,0.25)",cursor:"pointer",fontWeight:700,fontSize:"0.83rem"}}>
+              🗑️ Delete This Restaurant…
+            </button>
+          ) : (
+            <div style={{display:"flex",flexDirection:"column",gap:"10px"}}>
+              <p style={{margin:0,fontSize:"0.83rem",fontWeight:700,color:"#ef4444"}}>🗑️ Delete Restaurant — Choose how:</p>
+              {deleteApprovalStatus==="pending" ? (
+                <div style={{padding:"12px",background:"rgba(245,158,11,0.1)",borderRadius:"8px",display:"flex",alignItems:"center",gap:"8px"}}>
+                  <Loader2 size={16} color="#f59e0b" style={{animation:"spin 1s linear infinite"}}/>
+                  <p style={{margin:0,fontSize:"0.8rem",color:"#f59e0b"}}>Waiting for primary Telegram approval…</p>
+                </div>
+              ) : deleteApprovalStatus==="denied" ? (
+                <p style={{margin:0,fontSize:"0.8rem",color:"#ef4444"}}>❌ Rejected by primary Telegram account.</p>
+              ) : (
+                <>
+                  <p style={{margin:0,fontSize:"0.77rem",color:"var(--txt3)",lineHeight:1.5}}>⚠️ Requires approval from your primary Telegram account.</p>
+                  <button onClick={()=>requestDeleteApproval(true)}
+                    style={{padding:"10px",borderRadius:"8px",background:"rgba(16,185,129,0.1)",color:"var(--green)",border:"1px solid rgba(16,185,129,0.3)",cursor:"pointer",fontWeight:600,fontSize:"0.82rem"}}>
+                    🌿 Anonymise &amp; keep AI data (recommended)
+                  </button>
+                  <button onClick={()=>requestDeleteApproval(false)}
+                    style={{padding:"10px",borderRadius:"8px",background:"rgba(239,68,68,0.08)",color:"#ef4444",border:"1px solid rgba(239,68,68,0.2)",cursor:"pointer",fontWeight:600,fontSize:"0.82rem"}}>
+                    💣 Delete everything permanently
+                  </button>
+                  <button onClick={()=>setDeleteRestFlow(false)}
+                    style={{padding:"8px",borderRadius:"8px",background:"transparent",color:"var(--txt3)",border:"1px solid var(--bdr)",cursor:"pointer",fontSize:"0.8rem"}}>
+                    Cancel
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </Modal>
       )}
 
@@ -474,6 +601,12 @@ export default function Dashboard({ token, restaurantId, email, onLogout }: {tok
 
             {/* Store Tab */}
             {tab==="store" && <StoreSettings restaurantId={restaurantId} token={token} onStatus={setStatus}/>}
+
+            {/* Orders Tab */}
+            {tab==="orders" && <OrdersPanel restaurantId={restaurantId} token={token}/>}
+
+            {/* Chains Tab */}
+            {tab==="chains" && <ChainsPanel restaurantId={restaurantId} token={token} email={email}/>}
 
             {/* AI Insights Tab */}
             {tab==="insights" && (
